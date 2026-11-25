@@ -8,6 +8,14 @@ SideMind turns an image copied to your clipboard into a short AI-assisted refere
 ![Python](https://img.shields.io/badge/python-3.12-3776AB)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
+## Screenshot
+
+<p align="center">
+  <img src="docs/images/settings.png" width="300" alt="SideMind settings flyout showing Qwen provider selection, masked API key, display preferences, and detailed explanation mode">
+</p>
+
+*Settings flyout on Windows in dark mode, shown with customized display preferences. The API key is masked.*
+
 ## Features
 
 - Use your existing screenshot shortcut; no additional screen capture tool is required.
