@@ -1,0 +1,160 @@
+"""SideMind UI kit — small, quiet controls for the settings flyout (no dependency on main)."""
+import winreg
+from PySide6.QtCore import Qt,Signal,Property,QPropertyAnimation,QEasingCurve,QRectF,QPointF,QSize,QTimer
+from PySide6.QtGui import QPainter,QColor,QFont,QPainterPath,QPen,QFontMetrics
+from PySide6.QtWidgets import QAbstractButton,QWidget,QComboBox,QListView
+
+FAMILIES=["Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI"]
+
+def apps_dark():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return not bool(winreg.QueryValueEx(k,"AppsUseLightTheme")[0])
+    except OSError:return False
+
+LIGHT=dict(dark=False,bg="#FAFAFA",text="#1D1D1F",sub="#6E6E73",line="#E8E8EA",field="#FFFFFF",border="#D8D8DC",
+           accent="#007AFF",off="#D4D4D8",red="#D70015",hover="#EFEFF1",shadow=QColor(0,0,0,38))
+DARK=dict(dark=True,bg="#262628",text="#EDEDEF",sub="#98989D",line="#38383A",field="#1E1E20",border="#46464A",
+          accent="#0A84FF",off="#4A4A4E",red="#FF6961",hover="#323235",shadow=QColor(0,0,0,120))
+
+def theme(dark=None):
+    return DARK if (apps_dark() if dark is None else dark) else LIGHT
+
+def font(px,weight=QFont.Weight.Normal):
+    f=QFont();f.setFamilies(FAMILIES);f.setPixelSize(px);f.setWeight(weight)
+    return f
+
+class Switch(QAbstractButton):
+    """Small toggle; QCheckBox-compatible API."""
+    def __init__(self,t,parent=None):
+        super().__init__(parent)
+        self.t=t;self._p=0.0
+        self.setCheckable(True);self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus);self.setFixedSize(32,18)
+        self.anim=QPropertyAnimation(self,b"progress",self)
+        self.anim.setDuration(140);self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.toggled.connect(self._move)
+    def _get(self):return self._p
+    def _set(self,v):self._p=v;self.update()
+    progress=Property(float,_get,_set)
+    def _move(self,on):
+        if not self.isVisible():self._set(1.0 if on else 0.0);return
+        self.anim.stop();self.anim.setStartValue(self._p);self.anim.setEndValue(1.0 if on else 0.0);self.anim.start()
+    def sizeHint(self):return QSize(32,18)
+    def paintEvent(self,_):
+        p=QPainter(self);p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r=QRectF(self.rect()).adjusted(.5,.5,-.5,-.5)
+        a,b=QColor(self.t["off"]),QColor(self.t["accent"])
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(*(round(x+(y-x)*self._p) for x,y in zip(a.getRgb(),b.getRgb()))))
+        p.drawRoundedRect(r,r.height()/2,r.height()/2)
+        d=r.height()-4;x=r.left()+2+(r.width()-4-d)*self._p
+        p.setBrush(QColor("#FFFFFF"));p.drawEllipse(QRectF(x,r.top()+2,d,d))
+        if self.hasFocus():
+            p.setBrush(Qt.BrushStyle.NoBrush);p.setPen(QPen(b,1.5));p.drawRoundedRect(r,r.height()/2,r.height()/2)
+
+class Check(QAbstractButton):
+    """Compact checkbox: 13px rounded box + label."""
+    def __init__(self,text,t,parent=None):
+        super().__init__(parent)
+        self.t=t;self.setText(text);self.setCheckable(True);self.setFont(font(12))
+        self.setCursor(Qt.CursorShape.PointingHandCursor);self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+    def sizeHint(self):
+        return QSize(14+6+QFontMetrics(self.font()).horizontalAdvance(self.text())+2,20)
+    def paintEvent(self,_):
+        p=QPainter(self);p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        box=QRectF(.5,(self.height()-14)/2+.5,13,13)
+        acc=QColor(self.t["accent"])
+        if self.isChecked():
+            p.setPen(Qt.PenStyle.NoPen);p.setBrush(acc);p.drawRoundedRect(box,3.5,3.5)
+            path=QPainterPath();path.moveTo(box.left()+3.2,box.center().y()+.2)
+            path.lineTo(box.left()+5.6,box.center().y()+2.6);path.lineTo(box.right()-3,box.top()+3.8)
+            p.setPen(QPen(QColor("#FFFFFF"),1.6,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap,Qt.PenJoinStyle.RoundJoin))
+            p.setBrush(Qt.BrushStyle.NoBrush);p.drawPath(path)
+        else:
+            p.setPen(QPen(QColor(self.t["border"]),1));p.setBrush(QColor(self.t["field"]));p.drawRoundedRect(box,3.5,3.5)
+        if self.hasFocus():
+            p.setPen(QPen(acc,1.2));p.setBrush(Qt.BrushStyle.NoBrush);p.drawRoundedRect(box.adjusted(-1.5,-1.5,1.5,1.5),4.5,4.5)
+        p.setPen(QColor(self.t["text"]));p.setFont(self.font())
+        p.drawText(QRectF(20,0,self.width()-20,self.height()),Qt.AlignmentFlag.AlignVCenter|Qt.AlignmentFlag.AlignLeft,self.text())
+
+class Stepper(QWidget):
+    """[ − value + ] with QSpinBox-like API (value / setValue / setRange / valueChanged)."""
+    valueChanged=Signal(int)
+    def __init__(self,t,step=1,parent=None):
+        super().__init__(parent)
+        self.t=t;self.lo,self.hi,self.v,self.step=0,99,0,step
+        self.setFixedSize(84,24);self.setFont(font(12));self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.repeat=QTimer(self);self.repeat.timeout.connect(self._tick);self.dir=0
+    def setRange(self,lo,hi):self.lo,self.hi=lo,hi;self.setValue(self.v)
+    def setSingleStep(self,s):self.step=s
+    def value(self):return self.v
+    def setValue(self,v):
+        v=max(self.lo,min(self.hi,int(v)))
+        if v!=self.v:self.v=v;self.update();self.valueChanged.emit(v)
+    def _tick(self):
+        self.repeat.setInterval(60);self.setValue(self.v+self.dir*self.step)
+    def mousePressEvent(self,e):
+        x=e.position().x()
+        self.dir=-1 if x<24 else 1 if x>self.width()-24 else 0
+        if self.dir:self._tick();self.repeat.start(380)
+    def mouseReleaseEvent(self,_):self.repeat.stop();self.dir=0
+    def wheelEvent(self,e):self.setValue(self.v+(self.step if e.angleDelta().y()>0 else -self.step))
+    def keyPressEvent(self,e):
+        k=e.key()
+        if k in (Qt.Key.Key_Up,Qt.Key.Key_Right):self.setValue(self.v+self.step)
+        elif k in (Qt.Key.Key_Down,Qt.Key.Key_Left):self.setValue(self.v-self.step)
+        else:super().keyPressEvent(e)
+    def paintEvent(self,_):
+        p=QPainter(self);p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r=QRectF(self.rect()).adjusted(.5,.5,-.5,-.5)
+        p.setPen(QPen(QColor(self.t["accent"] if self.hasFocus() else self.t["border"]),1));p.setBrush(QColor(self.t["field"]))
+        p.drawRoundedRect(r,6,6)
+        p.setPen(QPen(QColor(self.t["line"]),1))
+        for x in (24.5,self.width()-24.5):p.drawLine(QPointF(x,5),QPointF(x,self.height()-5))
+        cy=self.height()/2
+        for x,plus,enabled in ((12,False,self.v>self.lo),(self.width()-12,True,self.v<self.hi)):
+            p.setPen(QPen(QColor(self.t["text"] if enabled else self.t["off"]),1.3,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(x-3.5,cy),QPointF(x+3.5,cy))
+            if plus:p.drawLine(QPointF(x,cy-3.5),QPointF(x,cy+3.5))
+        p.setPen(QColor(self.t["text"]));p.setFont(self.font())
+        p.drawText(QRectF(24,0,self.width()-48,self.height()),Qt.AlignmentFlag.AlignCenter,str(self.v))
+
+class Combo(QComboBox):
+    """QComboBox with a flat field and a drawn chevron."""
+    def __init__(self,t,parent=None):
+        super().__init__(parent)
+        self.t=t;self.setView(QListView());self.setFont(font(12))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+    def paintEvent(self,e):
+        super().paintEvent(e)
+        p=QPainter(self);p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(self.t["sub"]),1.3,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap,Qt.PenJoinStyle.RoundJoin))
+        x,y=self.width()-13,self.height()/2
+        p.drawPolyline([QPointF(x-3.5,y-1.5),QPointF(x,y+2),QPointF(x+3.5,y-1.5)])
+
+def qss(t):
+    return f"""
+    QLabel {{ background:transparent; color:{t['text']}; }}
+    QLabel#sub {{ color:{t['sub']}; }}
+    QLabel#err {{ color:{t['red']}; }}
+    QFrame#line {{ background:{t['line']}; border:none; }}
+    QLineEdit, QComboBox {{ background:{t['field']}; color:{t['text']}; border:1px solid {t['border']}; border-radius:6px;
+        padding:0 8px; min-height:22px; max-height:22px; font-size:12px; selection-background-color:{t['accent']}; }}
+    QLineEdit:focus, QComboBox:focus {{ border:1px solid {t['accent']}; }}
+    QComboBox::drop-down {{ border:none; width:22px; }}
+    QComboBox::down-arrow {{ image:none; }}
+    QComboBox QAbstractItemView {{ background:{t['field']}; color:{t['text']}; border:1px solid {t['border']};
+        outline:0; padding:3px; selection-background-color:{t['accent']}; selection-color:white; }}
+    QComboBox QAbstractItemView::item {{ min-height:22px; padding:0 6px; border-radius:4px; }}
+    QPushButton {{ border-radius:6px; min-height:24px; max-height:24px; padding:0 12px; font-size:12px;
+        background:{t['field']}; color:{t['text']}; border:1px solid {t['border']}; }}
+    QPushButton:hover {{ background:{t['hover']}; }}
+    QPushButton#primary {{ background:{t['accent']}; color:white; border:1px solid {t['accent']}; }}
+    QPushButton#primary:hover {{ background:{t['accent']}; border-color:{t['accent']}; }}
+    QPushButton#flat {{ background:transparent; border:none; color:{t['sub']}; padding:0 2px; }}
+    QPushButton#flat:hover {{ color:{t['red']}; }}
+    QPushButton#reveal {{ background:transparent; border:none; color:{t['sub']}; padding:0 2px; }}
+    QPushButton#reveal:hover {{ color:{t['accent']}; }}
+    """
