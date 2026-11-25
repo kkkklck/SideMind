@@ -1,6 +1,6 @@
 """SideMind UI kit — small, quiet controls for the settings flyout (no dependency on main)."""
 import winreg
-from PySide6.QtCore import Qt,Signal,Property,QPropertyAnimation,QEasingCurve,QRectF,QPointF,QSize,QTimer
+from PySide6.QtCore import Qt,Signal,Property,QPropertyAnimation,QEasingCurve,QRectF,QPointF,QSize,QTimer,QRect
 from PySide6.QtGui import QPainter,QColor,QFont,QPainterPath,QPen,QFontMetrics
 from PySide6.QtWidgets import QAbstractButton,QWidget,QComboBox,QListView
 
@@ -158,3 +158,96 @@ def qss(t):
     QPushButton#reveal {{ background:transparent; border:none; color:{t['sub']}; padding:0 2px; }}
     QPushButton#reveal:hover {{ color:{t['accent']}; }}
     """
+
+def steps(text):
+    """Put each ①②③… step on its own line."""
+    out=text.strip()
+    for ch in "②③④⑤⑥⑦⑧⑨⑩":out=out.replace(ch,"\n"+ch)
+    return "\n".join(s.strip() for s in out.split("\n") if s.strip())
+
+class DetailCard(QWidget):
+    """Quiet card shown above the taskbar bar on hover: answer, short reason, step-by-step explanation."""
+    M=10;W=340
+    def __init__(self,t):
+        from PySide6.QtWidgets import QLabel,QVBoxLayout,QHBoxLayout,QFrame
+        super().__init__(None,Qt.WindowType.Tool|Qt.WindowType.FramelessWindowHint|Qt.WindowType.WindowStaysOnTopHint|Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.t=t
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setFixedWidth(self.W+2*self.M)
+        v=QVBoxLayout(self);v.setContentsMargins(self.M+14,self.M+11,self.M+14,self.M+12);v.setSpacing(4)
+        top=QHBoxLayout();top.setSpacing(8)
+        self.answer=QLabel();self.answer.setFont(font(15,QFont.Weight.DemiBold));self.answer.setWordWrap(True)
+        self.meta=QLabel();self.meta.setFont(font(11))
+        top.addWidget(self.answer,1);top.addWidget(self.meta,0,Qt.AlignmentFlag.AlignTop|Qt.AlignmentFlag.AlignRight)
+        v.addLayout(top)
+        self.reason=QLabel();self.reason.setFont(font(12));self.reason.setWordWrap(True)
+        v.addWidget(self.reason)
+        self.rule=QFrame();self.rule.setFixedHeight(1)
+        v.addSpacing(4);v.addWidget(self.rule);v.addSpacing(4)
+        self.detail=QWidget();self.detail_v=QVBoxLayout(self.detail)
+        self.detail_v.setContentsMargins(0,0,0,0);self.detail_v.setSpacing(6)
+        self.detail.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        v.addWidget(self.detail)
+        for w in (self.answer,self.meta,self.reason):
+            w.setTextFormat(Qt.TextFormat.PlainText)
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.fade=QPropertyAnimation(self,b"windowOpacity",self);self.fade.setDuration(110)
+        self.anchor=None  # (left x, bottom y, screen rect): the card grows upward from here
+        self.apply_theme(t)
+    def text(self):
+        return "\n".join(self.detail_v.itemAt(i).widget().text() for i in range(self.detail_v.count()))
+    def apply_theme(self,t):
+        self.t=t
+        self.answer.setStyleSheet(f"color:{t['text']};background:transparent;")
+        self.detail.setStyleSheet(f"QLabel{{color:{t['text']};background:transparent;}}")
+        for w in (self.meta,self.reason):w.setStyleSheet(f"color:{t['sub']};background:transparent;")
+        self.rule.setStyleSheet(f"background:{t['line']};border:none;")
+        self.update()
+    def set_content(self,answer,reason="",detail="",meta="",error=False):
+        from PySide6.QtWidgets import QLabel
+        self.answer.setText(answer)
+        self.answer.setStyleSheet(f"color:{self.t['red'] if error else self.t['text']};background:transparent;")
+        self.meta.setText(meta);self.meta.setVisible(bool(meta))
+        self.reason.setText(reason);self.reason.setVisible(bool(reason))
+        while self.detail_v.count():
+            w=self.detail_v.takeAt(0).widget()
+            if w:w.hide();w.deleteLater()
+        lines=steps(detail).split("\n") if detail else []
+        for s in lines:
+            l=QLabel(s,self.detail);l.setFont(font(12));l.setWordWrap(True);l.setTextFormat(Qt.TextFormat.PlainText)
+            self.detail_v.addWidget(l);l.show()  # show now so the layout counts it when measuring
+        self.detail.setVisible(bool(lines));self.rule.setVisible(bool(lines))
+        self.fit();self.reposition()
+        QTimer.singleShot(0,lambda:(self.fit(),self.reposition()))  # re-measure once wrapping has settled
+    def fit(self):
+        """Exact height for the fixed width (word-wrapped labels included)."""
+        lay=self.layout();lay.activate()
+        h=lay.totalHeightForWidth(self.width()) if lay.hasHeightForWidth() else lay.totalSizeHint().height()
+        if self.anchor:h=min(h,self.anchor[1]-self.anchor[2].top()+self.M)
+        self.setFixedHeight(max(h,40))
+    def reposition(self):
+        if not self.anchor:return
+        x,bottom,a=self.anchor
+        x=max(a.left()+2-self.M,min(x,a.right()-self.width()+self.M))
+        self.move(x,max(a.top()-self.M,bottom-self.height()))
+    def resizeEvent(self,e):
+        super().resizeEvent(e);self.reposition()
+    def show_above(self,rect,screen):
+        """rect: global geometry of the bar. The card's visible bottom sits 6px above the bar."""
+        self.anchor=(rect.left()-self.M,rect.top()-6+self.M,screen.availableGeometry().united(QRect(rect)))
+        self.fit();self.reposition()
+        if not self.isVisible():
+            self.setWindowOpacity(0.0);self.show()
+            self.fade.stop();self.fade.setStartValue(0.0);self.fade.setEndValue(1.0);self.fade.start()
+            QTimer.singleShot(0,lambda:(self.fit(),self.reposition()))
+    def paintEvent(self,_):
+        p=QPainter(self);p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r=QRectF(self.rect()).adjusted(self.M,self.M,-self.M,-self.M)
+        s=self.t["shadow"];p.setPen(Qt.PenStyle.NoPen)
+        for i in range(self.M,0,-1):
+            c=QColor(s);c.setAlpha(int(s.alpha()*(1-i/self.M)**2/4));p.setBrush(c)
+            p.drawRoundedRect(r.adjusted(-i,-i+3,i,i+3),10+i,10+i)
+        p.setBrush(QColor(self.t["bg"]))
+        p.setPen(QPen(QColor(0,0,0,30) if not self.t["dark"] else QColor(255,255,255,26),1))
+        p.drawRoundedRect(r.adjusted(.5,.5,-.5,-.5),10,10)

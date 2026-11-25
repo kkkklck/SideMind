@@ -1,4 +1,4 @@
-"""SideMind v0.3.1 — minimal, visible taskbar assistant with opt-in clipboard images."""
+"""SideMind v0.3.3 — minimal, visible taskbar assistant with opt-in clipboard images."""
 import ctypes
 from ctypes import wintypes
 import hashlib
@@ -7,10 +7,11 @@ import sys
 import time
 import winreg
 from concurrent.futures import ThreadPoolExecutor
-from PySide6.QtCore import Qt,QTimer,QPoint,QRectF,QPropertyAnimation,QParallelAnimationGroup,QEasingCurve,QSettings,QBuffer,QIODevice,Signal,QObject,QAbstractNativeEventFilter,QLockFile,QStandardPaths
+from PySide6.QtCore import Qt,QEvent,QTimer,QPoint,QRectF,QPropertyAnimation,QParallelAnimationGroup,QEasingCurve,QSettings,QBuffer,QIODevice,Signal,QObject,QAbstractNativeEventFilter,QLockFile,QStandardPaths
 from PySide6.QtGui import QImage,QFont,QFontMetrics,QPainter,QColor,QPen
 from PySide6.QtWidgets import (QApplication,QWidget,QLabel,QHBoxLayout,QDialog,QLineEdit,QMessageBox,QPushButton,QVBoxLayout,QGridLayout,QLayout,QFrame)
-from vision import ask,endpoint
+from PySide6.QtNetwork import QLocalServer,QLocalSocket
+from vision import ask,endpoint,split_result
 import ui_kit as ui
 from secrets_win import protect,unprotect
 
@@ -20,6 +21,7 @@ PROVIDERS={
     "qwen-intl":("千问 · 新加坡","https://dashscope-intl.aliyuncs.com/compatible-mode/v1","qwen3-vl-plus","DASHSCOPE_API_KEY"),
     "custom":("自定义","https://api.openai.com/v1","gpt-4o-mini","SIDEMIND_API_KEY"),
 }
+INSTANCE="SideMind-v2-"+hashlib.sha1(os.path.expanduser("~").encode()).hexdigest()[:8]  # per-user pipe name
 FLAGS=Qt.WindowType.Tool|Qt.WindowType.FramelessWindowHint|Qt.WindowType.WindowStaysOnTopHint|Qt.WindowType.WindowDoesNotAcceptFocus
 
 class Hotkey(QAbstractNativeEventFilter):
@@ -47,7 +49,7 @@ def encode_image(image):
     buf.open(QIODevice.OpenModeFlag.WriteOnly)
     return bytes(buf.data()) if image.save(buf,"PNG") else None
 
-DISPLAY_DEFAULTS={"show_status":True,"show_time":True,"show_reason":False,"font_px":12,"width":350}
+DISPLAY_DEFAULTS={"show_status":True,"show_time":True,"show_reason":False,"font_px":12,"width":350,"show_detail":False}
 
 def taskbar_dark():
     try:
@@ -67,7 +69,9 @@ class Settings(QDialog):
     """Small flyout that opens right above the taskbar bar. Display changes preview live on the real bar."""
     M=12  # transparent margin for the shadow
     W=292
-    SAMPLE=("B、D","线粒体具有双层膜，参与细胞呼吸",0.8)
+    SAMPLE=("B、D","线粒体具有双层膜，参与细胞呼吸",0.8,
+            "①题干问的是线粒体结构与功能，先排除只描述叶绿体的选项。②线粒体由内外两层膜包被，内膜向内折叠形成嵴，B 正确。"
+            "③有氧呼吸第二、三阶段在线粒体中进行，为细胞提供大部分能量，D 正确。④易错点：A 把“半自主”说成“完全自主”，C 混淆了核糖体与线粒体。")
     def __init__(self,c):
         super().__init__(None,Qt.WindowType.Dialog|Qt.WindowType.FramelessWindowHint|Qt.WindowType.WindowStaysOnTopHint)
         self.c=c
@@ -88,7 +92,8 @@ class Settings(QDialog):
         self.key=QLineEdit();self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.demo=ui.Check("演示模式（不联网）",t);self.demo.setChecked(c.demo)
         self.show_status=ui.Check("状态",t);self.show_time=ui.Check("耗时",t);self.show_reason=ui.Check("原因",t)
-        for k in ("show_status","show_time","show_reason"):getattr(self,k).setChecked(c.display[k])
+        self.show_detail=ui.Check("悬停答案条显示解题详解",t)
+        for k in ("show_status","show_time","show_reason","show_detail"):getattr(self,k).setChecked(c.display.get(k,DISPLAY_DEFAULTS[k]))
         self.font_px=ui.Stepper(t);self.font_px.setRange(1,18);self.font_px.setValue(c.display["font_px"])
         self.width=ui.Stepper(t,10);self.width.setRange(180,440);self.width.setValue(c.display["width"])
 
@@ -127,9 +132,10 @@ class Settings(QDialog):
         for k in ("show_status","show_time","show_reason"):checks.addWidget(getattr(self,k))
         checks.addStretch()
         d.addWidget(name("显示"),0,0);d.addLayout(checks,0,1,1,3)
-        d.addWidget(name("字号"),1,0);d.addWidget(self.font_px,1,1)
+        d.addWidget(name("详解"),1,0);d.addWidget(self.show_detail,1,1,1,3)
+        d.addWidget(name("字号"),2,0);d.addWidget(self.font_px,2,1)
         wl=QLabel("宽度");wl.setObjectName("sub")
-        d.addWidget(wl,1,2,Qt.AlignmentFlag.AlignRight);d.addWidget(self.width,1,3)
+        d.addWidget(wl,2,2,Qt.AlignmentFlag.AlignRight);d.addWidget(self.width,2,3)
         d.setColumnStretch(1,1)
         v.addLayout(d)
 
@@ -145,7 +151,7 @@ class Settings(QDialog):
         ft.addWidget(quit_button);ft.addStretch();ft.addWidget(cancel);ft.addWidget(save)
         v.addLayout(ft)
 
-        for k in ("show_status","show_time","show_reason"):getattr(self,k).toggled.connect(self.update_preview)
+        for k in ("show_status","show_time","show_reason","show_detail"):getattr(self,k).toggled.connect(self.update_preview)
         self.font_px.valueChanged.connect(self.update_preview)
         self.width.valueChanged.connect(self.update_preview)
         self.provider.currentIndexChanged.connect(self.load)
@@ -155,7 +161,7 @@ class Settings(QDialog):
         self.update_preview()
 
     def display_values(self):
-        return {k:getattr(self,k).isChecked() for k in ("show_status","show_time","show_reason")} | {"font_px":self.font_px.value(),"width":self.width.value()}
+        return {k:getattr(self,k).isChecked() for k in ("show_status","show_time","show_reason","show_detail")} | {"font_px":self.font_px.value(),"width":self.width.value()}
     def update_preview(self,*_):
         """Preview on the real taskbar bar; restored on cancel."""
         if self.bar is None:return
@@ -247,6 +253,12 @@ class Bar(QWidget):
         self.elapsed=None
         self.error=False
         self.truncated=False
+        self.detail_text=""
+        self.full=""
+        self.card=None
+        self.pinned=False
+        self.hover=QTimer(self);self.hover.setSingleShot(True);self.hover.timeout.connect(self.show_card)
+        self.unhover=QTimer(self);self.unhover.setSingleShot(True);self.unhover.timeout.connect(self.hide_card)
         self.layout_=QVBoxLayout(self)
         self.layout_.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         self.layout_.setContentsMargins(7,0,7,0)
@@ -282,11 +294,12 @@ class Bar(QWidget):
         self.is_notice=notice
         self.text,self.error=text,error
         self.reason_text=""
+        self.detail_text=""
         self.elapsed=None
         self.render()
-    def set_result(self,text,reason="",elapsed=None):
+    def set_result(self,text,reason="",elapsed=None,detail=""):
         self.is_notice=False
-        self.text,self.reason_text,self.elapsed=text,reason,elapsed
+        self.text,self.reason_text,self.elapsed,self.detail_text=text,reason,elapsed,detail
         self.error=False
         self.render()
     def resizeEvent(self,event):
@@ -332,7 +345,50 @@ class Bar(QWidget):
             self.answer.setText(fit_text(combined,fm,answer_space))
             self.truncated|=self.answer.text()!=combined
         full=" · ".join(x for x in (shown_text,reason,elapsed) if x)
-        self.setToolTip(full)
+        self.full="" if self.is_notice else full
+        if self.card is not None and self.card.isVisible():
+            self.show_card() if self.has_card() else self.hide_card(force=True)
+    # ---- hover card: full answer, short reason, step-by-step explanation ----
+    def has_card(self):
+        if self.preview or self.is_notice or not self.text:return False
+        return bool(self.error or self.truncated or self.reason_text or (self.detail_text and self.style.get("show_detail",False)))
+    def show_card(self):
+        if not self.has_card():return
+        t=ui.theme(taskbar_dark())
+        if self.card is None:
+            self.card=ui.DetailCard(t)
+            self.card.installEventFilter(self)
+        else:self.card.apply_theme(t)
+        meta=" · ".join(x for x in (f"{self.elapsed:.1f}s" if self.elapsed is not None else "","已固定" if self.pinned else "") if x)
+        detail=self.detail_text if self.style.get("show_detail",False) else ""
+        self.card.set_content(self.text,self.reason_text,detail,meta,self.error)
+        self.card.show_above(self.frameGeometry(),self.screen())
+    def hide_card(self,force=False):
+        if self.pinned and not force:return
+        if force:self.pinned=False
+        if self.card is not None:self.card.hide()
+    def enterEvent(self,e):
+        self.unhover.stop()
+        if self.has_card() and not (self.card and self.card.isVisible()):self.hover.start(220)
+        super().enterEvent(e)
+    def leaveEvent(self,e):
+        self.hover.stop();self.unhover.start(200)
+        super().leaveEvent(e)
+    def mousePressEvent(self,e):
+        if e.button()==Qt.MouseButton.LeftButton and self.has_card():
+            self.pinned=not self.pinned;self.hover.stop()
+            self.show_card()
+        super().mousePressEvent(e)
+    def eventFilter(self,obj,e):
+        if obj is self.card:
+            if e.type()==QEvent.Type.Enter:self.unhover.stop()
+            elif e.type()==QEvent.Type.Leave:self.unhover.start(200)
+            elif e.type()==QEvent.Type.MouseButtonPress:self.hide_card(force=True)
+        return False
+    def paintEvent(self,e):
+        if not self.preview:  # alpha 1: invisible, but lets the whole bar catch the mouse on a layered window
+            QPainter(self).fillRect(self.rect(),QColor(0,0,0,1))
+        super().paintEvent(e)
     def place(self,screen):
         g=screen.geometry();a=screen.availableGeometry()
         taskbar_height=g.bottom()-a.bottom()
@@ -349,7 +405,7 @@ class Bar(QWidget):
             u.SetWindowPos(int(self.winId()),wintypes.HWND(-1),0,0,0,0,0x0013)
 
 class Bridge(QObject):
-    result=Signal(int,str,bool,str,object)
+    result=Signal(int,str,bool,str,object,str)
 
 class Controller:
     def __init__(self,app):
@@ -458,23 +514,24 @@ class Controller:
         self.busy=True
         self.bar.set_notice("演示中…" if self.demo else "AI 核对中…")
         if self.demo:
-            QTimer.singleShot(350,lambda:self.receive(seq,"演示：C",False,"线粒体具有双层膜",0.35));return
+            QTimer.singleShot(350,lambda:self.receive(seq,"演示：C",False,"线粒体具有双层膜",0.35,Settings.SAMPLE[3]));return
         base,model,key=self.base,self.model,self.key
         reason_mode=self.display['show_reason']
+        detail_mode=self.display.get('show_detail',False)
         def worker():
             t=time.monotonic()
             try:
-                result=ask(png,base,model,key,reason=reason_mode)
-                answer,_,reason=result.partition("｜")
-                self.bridge.result.emit(seq,answer.strip(),False,reason.strip(),time.monotonic()-t)
+                result=ask(png,base,model,key,reason=reason_mode,detail=detail_mode)
+                answer,reason,detail=split_result(result)
+                self.bridge.result.emit(seq,answer.strip(),False,reason.strip(),time.monotonic()-t,detail.strip())
             except Exception as e:
-                self.bridge.result.emit(seq,str(e) if isinstance(e,(ValueError,RuntimeError)) else "请求失败，请检查配置",True,"",None)
+                self.bridge.result.emit(seq,str(e) if isinstance(e,(ValueError,RuntimeError)) else "请求失败，请检查配置",True,"",None,"")
         self.pool.submit(worker)
-    def receive(self,seq,text,error,reason="",elapsed=None):
+    def receive(self,seq,text,error,reason="",elapsed=None,detail=""):
         self.busy=False
         if seq==self.seq and self.active and self.dialog is None:
             if error:self.bar.set_answer(text,True)
-            else:self.bar.set_result(text,reason,elapsed)
+            else:self.bar.set_result(text,reason,elapsed,detail)
         pending=self.pending
         self.pending=None
         if pending and self.active and self.dialog is None:self.submit(*pending)
@@ -485,13 +542,41 @@ class Controller:
         self.hotkey.close()
         self.pool.shutdown(wait=False,cancel_futures=True)
 
+def create_restart_server(name,parent=None):
+    """Restrict the local restart pipe to the current Windows user."""
+    server=QLocalServer(parent)
+    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+    if not server.listen(name):
+        server.deleteLater()
+        return None
+    return server
+
 def main():
     app=QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     lock=QLockFile(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.TempLocation)+"/SideMind-v2.lock")
     if not lock.tryLock(0):
-        QMessageBox.information(None,"SideMind","SideMind 已运行，Ctrl+Shift+1 打开设置。")
-        return 0
+        # Another copy is running: ask it to quit so a fresh launch always runs the current code.
+        sock=QLocalSocket();sock.connectToServer(INSTANCE)
+        if sock.waitForConnected(500):
+            sock.write(b"quit");sock.waitForBytesWritten(500);sock.disconnectFromServer()
+        if not lock.tryLock(4000):
+            QMessageBox.information(None,"SideMind","旧版 SideMind 仍在运行，无法自动替换。\n请按 Ctrl+Shift+1 → 退出，再重新打开 run.bat。")
+            return 0
+    QLocalServer.removeServer(INSTANCE)
+    server=create_restart_server(INSTANCE,app)
+    if server is not None:
+        def incoming():
+            while server.hasPendingConnections():
+                sock=server.nextPendingConnection()
+                def read(s=sock):
+                    if s.bytesAvailable() < 4:return
+                    if bytes(s.readAll()) == b"quit":app.quit()
+                    s.disconnectFromServer()
+                sock.readyRead.connect(read)
+                sock.disconnected.connect(sock.deleteLater)
+                read()
+        server.newConnection.connect(incoming)
     c=Controller(app)
     return app.exec()
 if __name__=="__main__":sys.exit(main())

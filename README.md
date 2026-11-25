@@ -13,6 +13,8 @@ SideMind turns an image copied to your clipboard into a short AI-assisted refere
 - Use your existing screenshot shortcut; no additional screen capture tool is required.
 - Compact taskbar-aligned answer display with a transparent background.
 - Optional short explanations, response latency and status text.
+- Optional hover card with step-by-step teaching notes, disabled by default.
+- Relaunching the app can replace an existing instance through a user-restricted local IPC channel.
 - Adjustable font size and display width, with a live preview on the taskbar.
 - A compact settings flyout with light and dark themes.
 - Bring your own API key: DeepSeek, Qwen or a custom OpenAI-compatible vision endpoint.
@@ -65,6 +67,14 @@ The current interface and default model prompts are in Simplified Chinese. Engli
 Presets are editable where applicable and do not guarantee model availability. Use an endpoint that accepts the OpenAI-compatible Chat Completions image message format. API access, model availability, pricing and image support depend on the provider and account.
 
 To try the interface without an API key, enable demo mode. It returns a clearly marked fixed sample rather than analyzing your screenshot.
+
+### Detailed explanations
+
+Fast answer mode is the default. To request more context, enable the detailed explanation option in settings. The same API request then asks for a short reason and a roughly 100–200 Chinese-character step-by-step explanation.
+
+Hover over an answer for about 220 ms to open the detail card. Move away to dismiss it, or click the answer bar to pin or unpin it. Clicking the card dismisses it. The longer response may increase latency and token usage. Previously saved preferences are retained.
+
+The card is a normal desktop window and may be visible during screen sharing. It is not designed to evade recording or monitoring.
 
 ## Privacy and safety
 

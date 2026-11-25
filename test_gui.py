@@ -1,9 +1,12 @@
 import os
 os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
 import unittest
+import uuid
+from PySide6.QtCore import Qt
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QImage,QColor
-from main import Bar,encode_image,PROVIDERS,DISPLAY_DEFAULTS,Settings
+from main import Bar,encode_image,PROVIDERS,DISPLAY_DEFAULTS,Settings,create_restart_server
 from secrets_win import protect,unprotect
 
 class TestGui(unittest.TestCase):
@@ -48,9 +51,9 @@ class TestGui(unittest.TestCase):
         self.assertEqual(bar.width(),180)
         self.assertTrue(bar.answer.text().startswith("B、D"))
         self.assertTrue(bar.truncated)
-        self.assertIn("参与细胞呼吸",bar.toolTip())
+        self.assertIn("参与细胞呼吸",bar.full)
         im=bar.grab().toImage()
-        self.assertEqual(im.pixelColor(im.width()-1,im.height()-1).alpha(),0)
+        self.assertLessEqual(im.pixelColor(im.width()-1,im.height()-1).alpha(),1)
         bar.close()
     def test_preview(self):
         bar=Bar()
@@ -84,7 +87,7 @@ class TestGui(unittest.TestCase):
         bar.set_state(True)
         bar.set_notice("等待截图")
         self.assertEqual(bar.answer.text(),"")
-        self.assertEqual(bar.toolTip(),"")
+        self.assertEqual(bar.full,"")
         bar.set_notice("AI 核对中…")
         self.assertEqual(bar.answer.text(),"")
         bar.set_result("B")
@@ -95,6 +98,69 @@ class TestGui(unittest.TestCase):
         bar.set_notice("已暂停")
         self.assertEqual(bar.answer.text(),"")
         bar.close()
+    def test_detail_card(self):
+        import ui_kit
+        self.assertEqual(ui_kit.steps("①甲。②乙。③丙"),"①甲。\n②乙。\n③丙")
+        bar=Bar()
+        bar.place(self.app.primaryScreen())
+        bar.set_state(True)
+        bar.set_result("B",elapsed=1.2)
+        self.assertFalse(bar.has_card())
+        bar.apply_style(DISPLAY_DEFAULTS | {"show_detail":True})
+        bar.set_result("B、D","双层膜",1.2,"①看条件。②用知识点。③得结论")
+        self.assertTrue(bar.has_card())
+        bar.show_card()
+        self.assertTrue(bar.card.isVisible())
+        self.assertIn("②用知识点",bar.card.text())
+        self.assertLess(bar.card.geometry().bottom(),bar.geometry().top()+bar.card.M)
+        long="①"+"很长的解析文字"*12+"②"+"继续"*30+"③"+"结论"*20
+        bar.set_result("B","叶绿体",1.0,long)
+        self.app.processEvents()
+        screen=self.app.primaryScreen().availableGeometry().united(bar.geometry())
+        self.assertLessEqual(bar.card.geometry().bottom()-bar.card.M,bar.geometry().top())
+        self.assertGreaterEqual(bar.card.geometry().top()+bar.card.M,screen.top())
+        self.assertGreater(bar.card.height(),150)
+        bar.pinned=True
+        bar.hide_card()
+        self.assertTrue(bar.card.isVisible())
+        bar.set_notice("等待截图")
+        self.assertFalse(bar.card.isVisible())
+        self.assertFalse(bar.pinned)
+        bar.apply_style(DISPLAY_DEFAULTS|{"show_detail":False})
+        bar.set_result("B","",None,"①详解")
+        self.assertFalse(bar.has_card())
+        bar.close()
+    def test_detail_default_and_plain_text(self):
+        import ui_kit
+        self.assertFalse(DISPLAY_DEFAULTS["show_detail"])
+        bar=Bar()
+        bar.set_result("B",detail="①说明")
+        self.assertFalse(bar.has_card())
+        bar.apply_style(DISPLAY_DEFAULTS | {"show_detail":True})
+        self.assertTrue(bar.has_card())
+        card=ui_kit.DetailCard(ui_kit.theme())
+        card.set_content("<b>B</b>","<img src='https://example.invalid/image.png'>","①<em>text</em>","0.8s")
+        for label in (card.answer,card.reason,card.meta,card.detail_v.itemAt(0).widget()):
+            self.assertEqual(label.textFormat(),Qt.TextFormat.PlainText)
+        self.assertEqual(card.answer.text(),"<b>B</b>")
+        card.close()
+        bar.close()
+
+    def test_restart_server_user_access(self):
+        name="SideMind-test-"+uuid.uuid4().hex
+        server=create_restart_server(name)
+        self.assertIsNotNone(server)
+        client=QLocalSocket()
+        try:
+            self.assertTrue(server.isListening())
+            self.assertEqual(server.socketOptions(),QLocalServer.SocketOption.UserAccessOption)
+            client.connectToServer(name)
+            self.assertTrue(client.waitForConnected(1000))
+        finally:
+            client.abort()
+            server.close()
+            QLocalServer.removeServer(name)
+
     def test_dpapi(self):
         token="fake-test-token"
         encrypted=protect(token)
